@@ -1,0 +1,16 @@
+services:
+  assistant:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/assistant.sqlite3
+    volumes:
+      - assistant-data:/data
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 90s
+volumes:
+  assistant-data:

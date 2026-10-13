@@ -1,0 +1,31 @@
+[Unit]
+Description=Standalone OpenAI Telegram assistant
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=telegram-assistant
+Group=telegram-assistant
+WorkingDirectory=/opt/dots-telegram-assistant
+EnvironmentFile=/etc/dots-telegram-assistant.env
+Environment=DATABASE_PATH=/var/lib/dots-telegram-assistant/assistant.sqlite3
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m telegram_assistant
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=90
+StateDirectory=dots-telegram-assistant
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

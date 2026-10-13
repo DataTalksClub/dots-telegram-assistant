@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.db
+*.db-*
+*.lock
+data/
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.coverage
+.DS_Store
