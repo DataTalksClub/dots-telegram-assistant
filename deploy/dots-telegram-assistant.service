@@ -1,5 +1,5 @@
 [Unit]
-Description=Standalone OpenAI Telegram assistant
+Description=Owner-only Telegram MCP Events transport
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=300
@@ -7,17 +7,19 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=telegram-assistant
-Group=telegram-assistant
+User=telegram-events
+Group=telegram-events
 WorkingDirectory=/opt/dots-telegram-assistant
-EnvironmentFile=/etc/dots-telegram-assistant.env
-Environment=DATABASE_PATH=/var/lib/dots-telegram-assistant/assistant.sqlite3
+EnvironmentFile=/etc/dots-telegram-events.env
+Environment=STATE_PATH=/var/lib/dots-telegram-events/events.sqlite3
+Environment=BIND_HOST=127.0.0.1
+Environment=PORT=8765
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 -m telegram_assistant
+ExecStart=/opt/dots-telegram-assistant/.venv/bin/python -m telegram_events
 Restart=on-failure
 RestartSec=15
 TimeoutStopSec=90
-StateDirectory=dots-telegram-assistant
+StateDirectory=dots-telegram-events
 StateDirectoryMode=0700
 UMask=0077
 NoNewPrivileges=true

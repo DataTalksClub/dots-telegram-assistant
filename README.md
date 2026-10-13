@@ -1,81 +1,84 @@
-# dots-telegram-assistant
+# Telegram Events for Vale
 
-A small, self-hosted **separate assistant**: private Telegram messages → OpenAI Responses API → plain-text Telegram replies. Python 3.11+ on Linux or macOS; Docker is supported. Standard-library runtime, no pip dependencies.
+A self-hosted, owner-only Telegram transport for the **same Vale dot that subscribes to this plugin**. It receives private Telegram text, emits `telegram.message` events, and exposes narrowly scoped tools to read the received message and reply in that owner's chat. Python 3.11+. Transport and persistence use the standard library; OAuth token verification uses pinned `PyJWT[crypto]` from PyPI.
 
-This is not a bridge to a ChatGPT conversation, subscription, identity, memory, account, or connected tools. It has its **own bounded local conversation history**. OpenAI API access and billing are separate from a ChatGPT subscription. Supply your own bot token and API key. No credentials or user data belong in this repository.
+There is **no model, OpenAI API key, inference call, prompt, conversation memory, or separate assistant** in this service. Vale's identity, memory, connected tools, and decisions remain with the subscribed dot. The plugin does not itself grant access to that dot or its tools. Until a compatible client installs it and creates a working event subscription, it cannot wake Vale or generate replies.
 
-## What it does
+**Status: live installation and end-to-end delivery are UNVERIFIED.** The default production mode is an OAuth resource server; deployment requires a separately configured OAuth 2.1 identity provider. Offline tests establish local behavior, not compatibility with the user's live dot account. This repository does not invent a private dot ingress URL or claim that ordinary ChatGPT MCP tool support includes Events subscriptions.
 
-- Allows only explicitly configured **numeric sender IDs AND numeric private chat IDs**. Sender must equal the private chat ID. Groups, channels, other users, bots, and edited messages are ignored.
-- Handles text and `/start`, `/help`, `/reset`. Non-text messages get a text-only explanation. Unknown slash commands never reach the model.
-- Persists intake, polling offset, conversation turns, model attempts, daily call counts, generated replies, and sent chunk progress in SQLite.
-- Caps input/context length, history turns, output tokens, retry attempts, and global daily API attempts.
-- Sends plain text with link previews disabled; splits at a conservative 4,000 UTF-16-unit boundary, including emoji.
-- Has **no shell, filesystem, browsing, external tools, scheduling, or autonomous actions**. Model text cannot execute anything.
+## Data flow and API
 
-## Local setup
+1. A dedicated Telegram bot long-polls the official Telegram Bot API.
+2. Only new text messages from the configured numeric owner in that same private chat are accepted. Other users, groups, channels, edited messages, and non-text updates cannot become owner events.
+3. The authenticated MCP client subscribes to `telegram.message`; the server delivers event notifications to its validated HTTPS callback.
+4. The subscribed dot decides what to do. `read_message(message_id)` retrieves an accepted message; `reply(message_id, text, idempotency_key)` sends a plain-text reply to that message in the fixed owner's chat.
 
-1. Create a Telegram bot using the official [@BotFather](https://t.me/BotFather). Keep its token private. Use a dedicated bot with no other poller and no webhook. This service will not silently remove an existing webhook.
-2. Create an API key in your [OpenAI project](https://platform.openai.com/api-keys), enable billing as needed, and check the model is available to your project. The example model `gpt-4.1-mini` is documented in the [model catalog](https://developers.openai.com/api/docs/models/gpt-4.1-mini); this is not a promise of access or current pricing. Change `OPENAI_MODEL` for your project.
-3. Clone this repository, then create your private configuration:
+`POST /mcp` requires an authorized bearer access token. Production `AUTH_MODE=oauth` validates tokens from the configured external issuer; `AUTH_MODE=bearer` is only for explicit local development. The implementation targets MCP protocol version `2026-07-28` with discovery, Events, and tools. Requests must carry MCP 2 protocol/client-capability metadata and matching `MCP-Protocol-Version` and `Mcp-Method` headers; tool calls also require matching `Mcp-Name`. Legacy initialize-only clients are not interchangeable. Inspect discovery/tool schemas for the precise wire contract. Events are **non-replayable** and use `cursor: null`; a durable local pending-delivery queue is not an event-history/replay API.
 
-   ```sh
-   cp .env.example .env
-   chmod 600 .env
-   # Edit .env with your local editor. Never paste credentials into a chat or commit them.
-   ```
+Tool scope is intentionally small:
 
-   Set the bot token and OpenAI key. The application reads environment variables, **not `.env` automatically**. Load only your own trusted configuration in your shell:
+- `read_message`: integer ID of an accepted owner message.
+- `reply`: integer message ID, nonempty text of at most 4,096 characters, and an idempotency key. Telegram's own text limits also apply. No arbitrary chat ID, recipient, file, command, URL-fetch, or shell tool.
 
-   ```sh
-   set -a
-   . ./.env
-   set +a
-   ```
+No `/reset` or local conversation-history command exists. Text sent to the bot is input for the subscribed dot, subject to that dot's permissions and policies.
 
-4. Verify your numeric IDs without a third-party ID bot:
+## Configuration
 
-   ```sh
-   python3 -m telegram_assistant.identify
-   ```
+Use a dedicated bot created with official [@BotFather](https://t.me/BotFather). Stop other pollers first. An existing Telegram webhook conflicts with long polling; inspect and deliberately resolve it rather than assuming the service will remove it.
 
-   With the worker stopped, send the random `/pair …` code printed by this helper to your bot **in a private chat**. The helper prints the exact sender and chat IDs from that matching update. Put both values in `.env`, then load it again. It never edits your allowlist, sends messages, or acknowledges/discards pending updates. Keep the pairing code local. The helper may time out if more than 100 older updates obscure the matching message: do not discard them blindly; use a new dedicated bot, or inspect and explicitly resolve the old backlog yourself. The initial `/pair` message will later receive “Unknown command”; this is harmless.
-5. Run:
+```sh
+cp .env.example .env
+chmod 600 .env
+# Edit .env locally. Never paste credentials into chat, commit them, or put them in a URL.
+```
 
-   ```sh
-   python3 -m telegram_assistant
-   ```
+Configure the OAuth issuer, audience, JWKS URL, and owner subject below. The application loads environment variables, not `.env` automatically. Docker Compose loads the file for you; for direct execution load only your own trusted file:
 
-   Send `/start`, a short question, then a follow-up. Restart the process and verify a follow-up still has context. `/reset` starts a fresh local conversation. Missing/invalid secrets or an empty allowlist prevent startup.
+```sh
+set -a
+. ./.env
+set +a
+```
 
-Multiple trusted users can be listed as comma-separated IDs in **both** allowlists. Conversations are isolated by user and private chat. Anyone you allow can consume the shared API quota. Do not authorize a username or a display name. Removing an ID also prevents already-queued jobs for that ID from being sent after restart.
+Required variables:
 
-## Limits and spending
+- `TELEGRAM_BOT_TOKEN`: the dedicated bot's secret token.
+- `TELEGRAM_USER_ID`: verified positive numeric owner ID.
+- `TELEGRAM_CHAT_ID`: verified positive numeric private chat ID, equal to the owner ID. A username or display name is insufficient.
+- `CALLBACK_ALLOWED_HOSTS`: exact comma-separated HTTPS callback hostnames supplied and verified by the intended MCP client. No wildcard, guessed host, URL scheme, port, or path. Do not put arbitrary domains here to make a failed subscription pass.
+- `AUTH_MODE`: production default `oauth`. Explicit `bearer` is for local development only.
+- `OAUTH_ISSUER`: exact HTTPS issuer from your OAuth provider's metadata.
+- `OAUTH_AUDIENCE`: exact canonical resource URL, such as `https://your-domain.example/mcp`; the issuer must mint tokens for this audience.
+- `OAUTH_JWKS_URL`: verified HTTPS signing-key endpoint of that issuer.
+- `OAUTH_SUBJECT`: exact verified `sub` claim for the one authorized owner. All other subjects are rejected.
 
-Defaults are in `.env.example`. `MAX_DAILY_CALLS=50` is a **global API-attempt limit**, including failures, retries, and attempts interrupted by crashes. It persists across restarts and resets at midnight UTC. It is **not a monetary spending cap**: model prices vary; prompts and replies incur API charges; a request can be billed even if its reply is lost. Also configure project-level controls and billing alerts in OpenAI. Don't assume an alert enforces a hard cap.
+For explicit `AUTH_MODE=bearer` local testing, the OAuth variables are unused and `MCP_AUTH_TOKEN` is required: generate a random secret of at least 32 characters with `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`. ChatGPT cannot present custom API keys, so this development mode is not a production installation shortcut.
 
-`MAX_CONTEXT_CHARS=24000` includes only recent complete question/answer pairs plus the current message; character counts are not token counts. The fixed instructions add overhead. Output is limited to `MAX_OUTPUT_TOKENS=1200` plus an independent 32,000-character defensive guard. Only the latest `MAX_HISTORY_TURNS=12` pairs are retained for each user/chat. Increase limits deliberately. Model-specific context limits can still cause API errors.
+Optional variables:
 
-## Reliability and boundaries
+- `STATE_PATH`: SQLite path, default `/data/events.sqlite3`.
+- `BIND_HOST`: default `127.0.0.1`.
+- `PORT`: default `8765`.
 
-- A batch's accepted jobs and next polling offset are committed in one transaction **before** Telegram can be told to advance. Replayed update IDs are deduplicated. Unauthorized payloads are not persisted.
-- One worker processes jobs in order. A delayed retry can briefly delay other users. Run **one replica per bot token and one worker per database**. A local file lock prevents two local workers sharing a database; it cannot prevent another host/database from polling the same bot.
-- Rate limits, network errors, and server errors get bounded exponential retries; `Retry-After` is honored up to one hour. Permanent request failures don't loop forever. A bad Telegram token or polling conflict stops the worker. A bad OpenAI key/model yields a generic user-visible error; check the logged status code and configuration.
-- Replies are saved before sending; a restart won't normally regenerate them. Sent chunk progress is durable. **Exactly-once network delivery is impossible here**: if OpenAI finishes before a crash/timeout, retrying can incur another charge; if Telegram accepts a chunk before the local commit, retrying can duplicate that chunk. After the configured attempts, undeliverable replies are abandoned with a status-only error log. No silent promise of guaranteed delivery.
-- Telegram retains pending updates for a limited time (currently documented as at most 24 hours). This cannot recover updates that expired while the service was down. On first start, queued messages may be processed; there is no automatic backlog deletion.
-- Graceful stop waits for the current blocking request (up to 75 seconds). Supervisors allow 90 seconds. No token, message body, user ID, request URL, response body, or raw exception is intentionally logged.
+Verify owner IDs from your bot's actual private-chat updates using the official [Telegram Bot API](https://core.telegram.org/bots/api#getupdates), while the worker is stopped. Inspect locally; bot tokens in request URLs and full responses are sensitive. Avoid third-party ID bots. Do not advance polling offsets or discard queued updates merely to discover an ID.
 
-## Privacy and security
+For a native run, install dependencies from PyPI into a virtual environment and choose a private writable state directory:
 
-Text and bounded conversation history are sent to OpenAI; replies go through Telegram. SQLite contains plaintext conversation history and pending messages/replies: restrict host and volume access, encrypt the disk/backups where appropriate, and don't share the database. The application creates new files with restrictive permissions, but you must fix permissions on pre-existing files. Completed jobs have their text and replies cleared; only up to 1,000 content-free queue records are kept.
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+mkdir -p data
+chmod 700 data
+export STATE_PATH="$PWD/data/events.sqlite3"
+python3 -m telegram_events
+```
 
-`/reset` clears active history for that user/chat. It does **not** delete Telegram messages, backups, provider logs, or guarantee forensic erasure of SQLite/WAL storage. Messages already queued after `/reset` start the new history. `store: false` is sent to OpenAI; this is **not a claim of zero provider retention**. Review [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data) and Telegram's terms before sending sensitive information. Rotate leaked keys/tokens at the provider, never by posting replacements in chat.
+## Deploy privately or with HTTPS
 
-There is no arbitrary URL/base-endpoint configuration, and HTTP redirects are refused to avoid forwarding credentials. Never run untrusted source trees or `.env` files. This is a minimal personal-use service, not a multi-tenant SaaS or a comprehensive abuse-prevention system.
+Run one instance per bot token and one process per state database. Keep the HTTP listener private. Choose either Secure MCP Tunnel (below) or a trusted HTTPS reverse proxy. A public server URL needs valid HTTPS; the tunnel route can reach the local listener without publishing it. Localhost alone, without a configured tunnel, is not a remote installation URL.
 
-## Docker
-
-With `.env` configured:
+### Docker Compose
 
 ```sh
 docker compose up --build -d
@@ -83,27 +86,92 @@ docker compose logs -f
 docker compose down
 ```
 
-The container runs as an unprivileged user with a read-only root filesystem, no published ports, and a persistent named volume. Do not run `docker compose down -v` unless you intend to delete history and durable queue/quota state. Back up the database while stopped (or use SQLite's backup API), including consistent WAL handling. Recreating a blank database resets the quota and offset; do not use that as a retry mechanism.
+The container runs as UID/GID 10001 with a read-only root filesystem and persistent state volume. Compose binds the published port only to **127.0.0.1:8765** on the host; binding `0.0.0.0` inside the isolated container is needed for that port mapping. Do not publish it on every host interface.
 
-## systemd (Linux alternative)
+For example, a separately installed, trusted Caddy reverse proxy on the host can use:
 
-Install Python 3.11+, create an unprivileged `telegram-assistant` system user/group, and place the reviewed source in `/opt/dots-telegram-assistant`, owned by an administrator and readable by that user. Save configuration as `/etc/dots-telegram-assistant.env` (root-owned, mode `0600`; systemd loads it). Copy `deploy/dots-telegram-assistant.service` to `/etc/systemd/system/`, inspect its paths, then:
+```caddyfile
+telegram-events.example.com {
+    reverse_proxy 127.0.0.1:8765
+}
+```
+
+Replace the example domain with a domain you control, point DNS at the host, and configure firewall/TLS access deliberately. This is an illustrative configuration, not a deployed endpoint. Preserve the `Authorization` header, disable request-body/credential logging, apply reasonable connection/request limits, and expose no other internal services. Do not remove MCP authentication just because the reverse proxy has TLS. If the proxy runs in another container, its loopback is different; configure a private container network deliberately instead of exposing the app to the internet.
+
+### systemd alternative
+
+Install Python 3.11+ and the package/dependencies in `/opt/dots-telegram-assistant/.venv`, create the unprivileged `telegram-events` system user/group, and install reviewed source in `/opt/dots-telegram-assistant`, owned by an administrator and readable by that user. Save configuration in `/etc/dots-telegram-events.env` (root-owned, mode `0600`). Inspect and copy `deploy/dots-telegram-assistant.service` to `/etc/systemd/system/dots-telegram-events.service`, then:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now dots-telegram-assistant
-sudo journalctl -u dots-telegram-assistant -f
+sudo systemctl enable --now dots-telegram-events
+sudo journalctl -u dots-telegram-events -f
 ```
 
-The unit uses `/var/lib/dots-telegram-assistant` for durable state. Use Docker **or** systemd, not both for one token. Native Windows is not supported by the POSIX file lock; use Linux/WSL or Docker.
+The unit uses `/var/lib/dots-telegram-events/events.sqlite3`, binds to loopback, and can use either Secure MCP Tunnel or the HTTPS reverse proxy. Use Docker **or** systemd for one bot, never both. Native Windows is not a supported deployment target; use Linux/WSL or Docker.
 
-## Development and verification
+### Secure MCP Tunnel alternative
+
+OpenAI's [custom-server guide](https://developers.openai.com/api/docs/guides/custom-mcp-server) supports choosing **Tunnel** instead of a public Server URL. This avoids publishing this service's HTTP listener. It does not publish the plugin publicly, establish Vale's identity automatically, or remove account/workspace restrictions.
+
+Follow the official [tunnel-client configuration reference](https://github.com/openai/tunnel-client/blob/master/docs/configuration.md) for setup:
+
+- Obtain an authorized tunnel ID and runtime API key. Runtime/connector users need Tunnels Read + Use; creating/managing tunnels needs separate permissions. Keep the runtime key separate from any admin key and out of source control, chat, and command arguments.
+- Run the tunnel client on a host that can reach `http://127.0.0.1:8765/mcp`; configure that address as its main MCP server binding. Compose already publishes this address only on the host loopback. A client in another container needs deliberate private networking.
+- Use the official OAuth-aware profile guidance and its `doctor` checks. Configure any separate OAuth origin trust explicitly. Keep `AUTH_MODE=oauth`; the tunnel runtime key authenticates the tunnel connection, not the Telegram owner's OAuth identity.
+
+In ChatGPT's custom MCP server dialog, select **Tunnel**, choose the verified tunnel or enter its returned ID, configure OAuth, and review the discovered tools. Do not put the tunnel runtime key in this service's `MCP_AUTH_TOKEN` field.
+
+This server still requires its configured HTTPS resource audience, issuer metadata, owner subject, and scopes. Verify their discovery/routing and token audience with the tunnel's OAuth behavior before relying on it; do not change the audience to a loopback HTTP URL to bypass validation. Event delivery remains **outbound HTTPS** from this service to the client's verified callback host, and the host also needs outbound Telegram/JWKS connectivity. The tunnel does not replace the callback allowlist or subscription renewal.
+
+No tunnel has been installed, registered, or started by this repository. Tunnel/OAuth/Event interoperability with the live dot remains **UNVERIFIED** and must pass the same end-to-end checklist below.
+
+## Connect the existing dot
+
+Deployment and plugin installation are distinct. Follow the official [connect-and-test guide](https://developers.openai.com/plugins/deploy/connect-chatgpt) and [authentication guide](https://developers.openai.com/plugins/build/auth), checked 2026-10-13. Authenticated ChatGPT plugins use OAuth 2.1; custom API keys are not supported.
+
+This service is the **resource server**, not an authorization server. Use an established OAuth provider with authorization-code + PKCE, supported client identification/registration, authorization metadata, and refresh-token support appropriate for long-lived access. Configure that provider to issue RS256 JWT access tokens with the exact issuer, resource audience, and owner subject above, and scopes `telegram:read` and `telegram:reply`. Reading, Events, and discovery require the read scope; replies require the reply scope. Public protected-resource metadata is available at `/.well-known/oauth-protected-resource/mcp` (with a root alias). Its advertised issuer must have working authorization-server metadata.
+
+The external provider must support the client's OAuth registration and resource parameter end to end. That setup, issuer policy, user consent, token issuance/refresh, and real ChatGPT connection are **operator prerequisites and remain unverified**. Configuring four environment variables alone does not create an OAuth provider. Do not make the service anonymous to get past a connection failure or replace OAuth with its development bearer gate.
+
+For the public-endpoint workflow: open ChatGPT Plugins, choose the plus button and **Add custom MCP server**, enter a name/description and the HTTPS `/mcp` URL, configure OAuth, review the risk warning, choose **Create as a plugin**, and inspect discovered tools. Account/workspace policy may restrict this; recheck the official guide when deploying. Obtain verified client callback hostnames for `CALLBACK_ALLOWED_HOSTS`. Never guess an internal ingress address, put secrets in endpoint URLs, or enter the Telegram bot token in the installer.
+
+After installation, subscribe the intended existing Vale dot to `telegram.message`, authorize the intended Telegram use in that dot, and verify all of these before treating the connection as live:
+
+1. Unauthenticated `/mcp` requests fail; authenticated discovery succeeds through the selected HTTPS endpoint or authorized tunnel.
+2. OAuth consent/token refresh and event subscription succeed with the verified issuer, owner identity, scopes, and callback host.
+3. A fresh text sent by the owner in the private bot chat produces one usable event.
+4. The same Vale dot can read that message and explicitly reply to its message ID.
+5. A different Telegram user and a group message produce no owner event or reply.
+6. Retrying a completed reply with the same idempotency key does not send a duplicate.
+7. Restart the transport; verify durable state and no duplicate sends.
+
+A successful local HTTP request or mock callback test does not prove any of steps 2–4 against a live dot.
+
+## Reliability and privacy
+
+- SQLite holds accepted message content, polling offset, deduplication records, subscriptions, pending event deliveries, and reply outcomes. Treat the database, WAL files, volume, and backups as sensitive, including any callback secrets. Restrict permissions, use encrypted storage/backups where appropriate, and never attach state to bug reports.
+- Accepted intake and polling progress are durable. Pending callback delivery is limited to eight attempts and a 24-hour expiry. Expired/exhausted deliveries are not silently converted to new events. Non-replayable events cannot be recovered through a replay cursor; retain and reconcile failures deliberately.
+- At most one active event subscription is supported. Subscription grants are finite and capped at 24 hours and, in OAuth mode, at the access token expiry, including requests with `ttlMs: null`. Pending deliveries stop at subscription expiry; renewal requires a valid token for the configured owner and scope. JWT revocation at the issuer is not observed instantly without introspection, which is not implemented here; use short-lived access tokens. The client must renew before expiry. Callback signing-secret rotation allows a 300-second overlap.
+- Telegram and network delivery are not exactly-once. A callback may have been accepted before an acknowledgement was lost, so the client must deduplicate event IDs. A failed or ambiguous **Telegram reply is never automatically resent**, including after restart. Inspect Telegram and the returned status before choosing any new send. A new idempotency key is a new action and can duplicate an earlier ambiguous send.
+- Telegram retains pending updates for a limited period (the official API currently documents no more than 24 hours). The service cannot recover expired updates or messages missed before subscription from Telegram history.
+- State has no automatic retention/pruning policy; monitor disk use. Do not casually delete deduplication or idempotency receipts to reclaim space. Plan a deliberate stopped-service archival/migration with reconciliation before resuming.
+- Back up while stopped or with SQLite's backup API; handle WAL consistently. Do not run `docker compose down -v` unless intentionally deleting durable state. A blank/replaced database loses deduplication and send receipts, and is not a safe retry mechanism.
+- Changing the owner is not a supported in-place multi-user migration. Stop the deployment, review state handling, and configure a separate dedicated instance rather than carrying one owner's state into another owner's service.
+- Callback verification runs for every subscribe/refresh, including repeated requests, rather than caching a successful challenge. This is a conservative implementation deviation from the guide's recommended bounded verification cache.
+- Callback hosts are an explicit trust boundary. HTTPS alone does not establish ownership. Keep the list narrow; do not allow internal/private destinations or redirects as a shortcut. Keep secrets out of logs and rotate compromised credentials at the provider.
+- Message content crosses Telegram, your host, and the subscribed MCP client's delivery/processing systems. Their retention rules apply. This is not an end-to-end encrypted Telegram channel or a promise of zero retention. Deleting local state does not erase provider data or backups.
+
+## Development
 
 ```sh
+python3 -m pip install .
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q telegram_assistant tests
+python3 -m compileall -q telegram_events tests
 ```
 
-Tests use temporary SQLite databases and mocked network clients; no secrets, live bot, or paid API calls are needed. CI runs the same tests on Python 3.11, 3.12, and 3.13. Live provider integration, deployment, and real-account model access must be smoke-tested by the operator; offline tests do not establish those.
+Dependency installation requires package-registry access. The tests themselves are offline and require no real credentials, live bot, identity provider, or model/API access. CI tests Python 3.11, 3.12, and 3.13; GitHub Actions remain pinned to reviewed commit hashes. Live Telegram, reverse-proxy deployment, custom-plugin installation, and dot subscription must be tested separately by the operator.
 
-The service follows the official [Responses conversation-state guide](https://developers.openai.com/api/docs/guides/conversation-state) and [Telegram Bot API](https://core.telegram.org/bots/api). Its code and documentation were written independently; no private assistant configuration or private repository code is included.
+## Public design reference
+
+The event-source and message-reading separation was informed by Sriram Panyam's public [mcpkit Telegram Events example](https://github.com/panyam/mcpkit/tree/main/examples/events/telegram), an experimental Go implementation under [Apache-2.0](https://github.com/panyam/mcpkit/blob/main/LICENSE). This transport is a new, narrower Python implementation, with no copied upstream source or SDK dependency. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for reviewed file identifiers and attribution. The reference example's demo authentication and wider replay/stream features are not this service's contract.

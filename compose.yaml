@@ -1,11 +1,15 @@
 services:
-  assistant:
+  telegram-events:
     build: .
     env_file: .env
     environment:
-      DATABASE_PATH: /data/assistant.sqlite3
+      STATE_PATH: /data/events.sqlite3
+      BIND_HOST: 0.0.0.0
+      PORT: "8765"
+    ports:
+      - "127.0.0.1:8765:8765"
     volumes:
-      - assistant-data:/data
+      - events-data:/data
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -13,4 +17,4 @@ services:
       - no-new-privileges:true
     stop_grace_period: 90s
 volumes:
-  assistant-data:
+  events-data:
